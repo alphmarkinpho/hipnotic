@@ -990,6 +990,7 @@ const FIREBASE_CONFIG = {
 // FIREBASE — INIT
 // ══════════════════════════════════════════
 let fbAuth = null, fbDb = null, currentUid = null, syncOff = null;
+let archivedTasks = [];
 
 function loadConfig() {
   // Verifica se o config foi preenchido diretamente no arquivo
@@ -1127,6 +1128,12 @@ function setupUserBar(user) {
 function startSync(uid) {
   loadCustomCategories(uid);
   if (syncOff) syncOff();
+
+  // Load archive for stats (one-time read, then keep in sync)
+  fbDb.ref(`todos/${uid}/archive`).on('value', snap => {
+    archivedTasks = [];
+    snap.forEach(child => { archivedTasks.push(child.val()); });
+  });
 
   const ref = fbDb.ref(`todos/${uid}/tasks`);
 
@@ -1361,6 +1368,17 @@ function saveTask(task) {
 function deleteFromFB(taskId) {
   if (!currentUid || !fbDb) return;
   fbDb.ref(`todos/${currentUid}/tasks/${taskId}`).remove();
+}
+
+function archiveTask(t) {
+  if (!currentUid || !fbDb) return;
+  const archived = Object.assign({}, sanitize(t), { archivedAt: new Date().toISOString() });
+  fbDb.ref(`todos/${currentUid}/archive/${t.id}`).set(archived);
+  fbDb.ref(`todos/${currentUid}/tasks/${t.id}`).remove();
+  (t.attachments||[]).forEach(a=>{
+    dbDel(a.id).catch(()=>{});
+    if(blobCache[a.id]){URL.revokeObjectURL(blobCache[a.id]);delete blobCache[a.id];}
+  });
 }
 
 function sanitize(obj) {
@@ -1775,9 +1793,9 @@ function onDrop(e,targetId){
 // ── CLEAR ─────────────────────────────────
 function clearDone(){
   const n=tasks.filter(t=>t.done).length; if(!n){toast('Nenhuma concluída.');return;}
-  if(!confirm(`Remover ${n} tarefa(s) concluída(s)?`)) return;
-  tasks.filter(t=>t.done).forEach(t=>{(t.attachments||[]).forEach(a=>{dbDel(a.id).catch(()=>{});if(blobCache[a.id]){URL.revokeObjectURL(blobCache[a.id]);delete blobCache[a.id];}});deleteFromFB(t.id);});
-  toast(`${n} tarefa(s) removida(s) 🧹`);
+  if(!confirm(`Arquivar ${n} tarefa(s) concluída(s)? Elas serão removidas da lista mas mantidas nos relatórios.`)) return;
+  tasks.filter(t=>t.done).forEach(t=>archiveTask(t));
+  toast(`${n} tarefa(s) arquivada(s) 🗄️`);
 }
 function clearAll(){
   if(!tasks.length) return;
@@ -1943,6 +1961,7 @@ function statsTaskDoneOn(t, dateStr) {
 }
 
 function renderStats() {
+  const allTasksForStats = tasks.concat(archivedTasks);
   const weekDays = statsGetWeekRange(_statsWeekOffset);
   const today = new Date().toISOString().slice(0,10);
   const dayNames = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
@@ -1962,9 +1981,9 @@ function renderStats() {
 
   // tarefas da semana
   const weekSet = new Set(weekDays);
-  const doneTasks = tasks.filter(t => t.done && weekSet.has(t.doneAt?.slice(0,10) || t.date || t.dateStart || ''));
+  const doneTasks = allTasksForStats.filter(t => t.done && weekSet.has(t.doneAt?.slice(0,10) || t.date || t.dateStart || ''));
   const createdThisWeek = tasks.filter(t => weekSet.has((t.createdAt||'').slice(0,10)));
-  const totalPending = tasks.filter(t => !t.done).length;
+  const totalPending = allTasksForStats.filter(t => !t.done).length;
 
   // por dia
   const byDay = weekDays.map(d => tasks.filter(t => statsTaskDoneOn(t, d)).length);
